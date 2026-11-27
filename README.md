@@ -4,6 +4,8 @@
 
 Live-tested on **2026-11-27 (UTC)** from a Korean IP with plain `requests`, no login and no API key. The collected sample in `samples/webtoons_sample.csv` holds **25 real rows** from that run.
 
+The complete research record for **all 16 platforms** that were probed (including the ones that are blocked and why) is in [`docs/ALL_PLATFORMS_TESTED.md`](docs/ALL_PLATFORMS_TESTED.md).
+
 ### What it collects
 
 Tower of God, The God of High School and Bastard are Korean webtoons published on the global service; the comments are what non-Korean readers actually say about them, in English and in the site's other service languages.
