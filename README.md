@@ -47,6 +47,10 @@ python WebtoonCrawler.py --limit 50 --out my_run.csv
 | `--pages` | `1` | comment pages (cursor rounds) per episode |
 | `--limit` | `25` | max rows |
 | `--out` | `WebtoonCrawlerResults.csv` | output CSV path |
+| `--days N` | off | only items from the last N days (`7` = last week, `30` = last month) |
+| `--since YYYY-MM-DD` | off | only items on/after that day (midnight UTC); a full `YYYY-MM-DD HH:MM` works too |
+| `--until YYYY-MM-DD` | off | only items on/before that day (through 23:59:59 UTC) |
+| `--drop-undated` | off | also drop rows whose date the site did not print (they are kept by default) |
 
 Examples:
 
@@ -55,6 +59,22 @@ python WebtoonCrawler.py --limit 5 --out quick.csv
 ```
 
 The CSV is written UTF-8 with a BOM so Excel opens Korean/Chinese text correctly.
+
+### Date filtering
+
+Every row carries `post_created_time` (UTC), so a run can be limited to a window:
+
+```
+python WebtoonCrawler.py --days 7                     # comments from the last week
+python WebtoonCrawler.py --days 30 --episodes 3     # the last month
+python WebtoonCrawler.py --since 2026-11-01 --until 2026-11-15
+```
+
+`--days` and `--since` cannot be combined (pick one); `--until` works with either. `--limit` counts the rows that survive the filter, so `--days 7 --limit 60` is 60 recent rows, not 60 rows minus the old ones.
+
+**Early stop.** Both loops are newest-first — the series page lists episodes newest-first and the comment API returns newest comments first — so a window also ends the work early: an episode older than `--since` is skipped without fetching its comments (2 older episodes in a row stop that series), and a comment page that runs past `--since` for 5 comments in a row ends the episode. The three default series are finished or on hiatus (Tower of God's newest episode is *Feb 23, 2025*), so `--days 7` on the defaults honestly returns nothing — point `--series` at a series that is currently updating.
+
+**Undated rows.** A row whose date the site never printed is kept, because a missing date is not evidence of an old item; the CLI reports how many such rows it kept, and `--drop-undated` drops them instead.
 
 ### Output schema
 
@@ -140,8 +160,28 @@ python WebtoonCrawler.py --limit 50 --out my_run.csv
 | `--pages` | `1` | 회차당 댓글 페이지(커서) 수 |
 | `--limit` | `25` | 최대 행 수 |
 | `--out` | `WebtoonCrawlerResults.csv` | 출력 CSV 경로 |
+| `--days N` | 꺼짐 | 최근 N일만 (`7` = 지난 한 주, `30` = 지난 한 달) |
+| `--since YYYY-MM-DD` | 꺼짐 | 이 날짜 이후(자정 UTC 기준)만; `YYYY-MM-DD HH:MM` 형식도 가능 |
+| `--until YYYY-MM-DD` | 꺼짐 | 이 날짜 이전(23:59:59 UTC까지)만 |
+| `--drop-undated` | 꺼짐 | 사이트가 날짜를 표시하지 않은 행도 버림(기본은 유지) |
 
 CSV는 UTF-8(BOM)으로 저장되어 엑셀에서 한글·중국어가 깨지지 않습니다.
+
+### 날짜 필터
+
+모든 행에 `post_created_time`(UTC)이 있으므로 실행 범위를 기간으로 좁힐 수 있습니다.
+
+```
+python WebtoonCrawler.py --days 7                     # comments from the last week
+python WebtoonCrawler.py --days 30 --episodes 3     # the last month
+python WebtoonCrawler.py --since 2026-11-01 --until 2026-11-15
+```
+
+`--days`와 `--since`는 함께 쓸 수 없고(하나만), `--until`은 둘 중 어느 것과도 함께 쓸 수 있습니다. `--limit`은 필터를 통과한 행을 기준으로 셉니다. 즉 `--days 7 --limit 60`은 "최근 7일 안의 60행"입니다.
+
+**조기 종료.** 두 반복 모두 최신순(회차 목록 최신순, 댓글 API 최신순)이므로 기간을 주면 작업도 일찍 끝납니다. `--since`보다 오래된 회차는 댓글을 받지 않고 건너뛰고(2회차 연속이면 그 시리즈 중단), 댓글 페이지에서 `--since` 이전 댓글이 5개 연속 나오면 그 회차를 끝냅니다. 기본 3개 시리즈는 완결·휴재 작품(《신의 탑》 최신 회차는 *2025-02-23*)이라 기본값으로 `--days 7`을 주면 결과가 없는 것이 정확한 답입니다. 연재 중인 작품을 `--series`로 지정하세요.
+
+**날짜 없는 행.** 사이트가 날짜를 표시하지 않은 행은 기본적으로 유지합니다. 날짜가 없다는 것은 오래된 항목이라는 증거가 아니기 때문입니다. CLI가 그런 행이 몇 개인지 알려 주고, `--drop-undated`를 주면 함께 버립니다.
 
 ### 출력 컬럼
 

@@ -283,6 +283,180 @@ def write_csv(rows: Iterable[dict], path: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Date window (--days / --since / --until)
+# ---------------------------------------------------------------------------
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+#: How many older-than-`since` items in a row end a newest-first listing.
+#: Pinned or re-ranked items sit among the newest ones, so one old date proves
+#: nothing; a run of them does.
+EARLY_STOP_BUFFER = 3
+
+
+def parse_date_arg(value: str | None, *, end_of_day: bool = False) -> str:
+    """``--since``/``--until`` value -> ``'YYYY-MM-DD HH:MM:SS'`` (UTC).
+
+    A bare date means midnight, or 23:59:59 with ``end_of_day`` (so ``--until
+    2026-11-27`` includes that whole day). A full timestamp (``2026-11-27
+    09:30`` or the ``T``-separated form) is kept to the second. Empty -> ``""``;
+    anything else raises ``ValueError``, which the CLI turns into a message.
+    """
+    if not value:
+        return ""
+    text = str(value).strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            moment = dt.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if fmt == "%Y-%m-%d" and end_of_day:
+            moment = moment.replace(hour=23, minute=59, second=59)
+        return moment.strftime(DATE_FORMAT)
+    raise ValueError(f"unrecognised date {value!r} - use YYYY-MM-DD")
+
+
+class DateWindow:
+    """Inclusive ``[since, until]`` window over UTC ``'YYYY-MM-DD HH:MM:SS'`` stamps.
+
+    Both bounds are optional and an inactive window keeps every row. Rows whose
+    date the site never printed are **kept** by default - a missing date is not
+    evidence of an old item, and dropping it would quietly hide data. Pass
+    ``strict=True`` (CLI: ``--drop-undated``) to drop those rows as well.
+    """
+
+    def __init__(self, since: str = "", until: str = "", *, strict: bool = False):
+        self.since = since or ""
+        self.until = until or ""
+        self.strict = strict
+
+    @property
+    def active(self) -> bool:
+        return bool(self.since or self.until)
+
+    def contains(self, stamp: str | None) -> bool:
+        if not self.active:
+            return True
+        if not stamp:
+            return not self.strict
+        if self.since and stamp < self.since:
+            return False
+        if self.until and stamp > self.until:
+            return False
+        return True
+
+    def describe(self) -> str:
+        if not self.active:
+            return "off"
+        parts = []
+        if self.since:
+            parts.append(f"since {self.since}")
+        if self.until:
+            parts.append(f"until {self.until}")
+        return ", ".join(parts) + (" (undated rows dropped)" if self.strict else "")
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"DateWindow({self.since!r}, {self.until!r}, strict={self.strict})"
+
+
+def build_window(
+    days: int | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    *,
+    strict: bool = False,
+    now: dt.datetime | None = None,
+) -> DateWindow:
+    """CLI values -> :class:`DateWindow`.
+
+    ``--days 7`` starts at 00:00 UTC seven days before ``now`` (``--days 30``
+    likewise), so "the last week" always covers seven whole days including
+    today. ``--since`` wins over ``--days`` when both are given, though the CLI
+    makes them mutually exclusive.
+    """
+    if days is not None:
+        if days < 0:
+            raise ValueError("--days cannot be negative")
+        moment = now or dt.datetime.now(TZ_UTC)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=TZ_UTC)
+        start = (moment.astimezone(TZ_UTC) - dt.timedelta(days=days)).strftime("%Y-%m-%d")
+        since = start
+    return DateWindow(parse_date_arg(since), parse_date_arg(until, end_of_day=True),
+                      strict=strict)
+
+
+def filter_rows(rows: Iterable[dict], window: DateWindow | None = None) -> list[dict]:
+    """Rows whose ``post_created_time`` falls inside ``window`` (page order kept)."""
+    window = window or DateWindow()
+    return [row for row in rows if window.contains(row.get("post_created_time"))]
+
+
+def crossed_window(stamps: Iterable[str], window: DateWindow | None = None,
+                   *, buffer: int = EARLY_STOP_BUFFER) -> bool:
+    """True once ``buffer`` dated items **in a row** are older than ``window.since``.
+
+    Only for listings that are verifiably newest-first. Pinned items and mild
+    re-ranking put an old date among the newest ones, so a single older item
+    must not end pagination; a run of ``buffer`` of them does. Undated items are
+    skipped - they neither confirm nor deny the order. An inactive window, or
+    one with only ``until``, never stops pagination.
+    """
+    window = window or DateWindow()
+    if not window.since:
+        return False
+    need = max(1, buffer)
+    older = 0
+    for stamp in stamps:
+        if not stamp:
+            continue
+        if stamp < window.since:
+            older += 1
+            if older >= need:
+                return True
+        else:
+            older = 0
+    return False
+
+
+def add_window_args(p: argparse.ArgumentParser) -> None:
+    """The shared date-filter flags, identical in every *Crawler repo."""
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--days", type=int, default=None,
+                       help="only items from the last N days (7 = last week, 30 = last month)")
+    group.add_argument("--since", default=None,
+                       help="only items on/after this date (YYYY-MM-DD)")
+    p.add_argument("--until", default=None,
+                   help="only items on/before this date (YYYY-MM-DD)")
+    p.add_argument("--drop-undated", action="store_true",
+                   help="also drop rows whose date the site did not print (default: keep them)")
+
+
+def window_from_args(args, *, now: dt.datetime | None = None) -> DateWindow:
+    """Parsed CLI args -> :class:`DateWindow`, exiting with a readable message."""
+    try:
+        return build_window(getattr(args, "days", None), getattr(args, "since", None),
+                            getattr(args, "until", None),
+                            strict=getattr(args, "drop_undated", False), now=now)
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}")
+
+
+def window_summary(rows: Iterable[dict], window: DateWindow | None = None,
+                   total: int | None = None) -> str:
+    """One line for the CLI: how many rows the window kept, and the undated ones."""
+    rows = list(rows)
+    window = window or DateWindow()
+    undated = sum(1 for row in rows if not row.get("post_created_time"))
+    if not window.active:
+        return f"{len(rows)} rows (no date filter; {undated} without a printed date)"
+    head = (f"{len(rows)} of {total} rows inside {window.describe()}" if total is not None
+            else f"{len(rows)} rows inside {window.describe()}")
+    if undated:
+        head += (f"; {undated} dropped for having no printed date" if window.strict
+                 else f"; {undated} kept without a printed date")
+    return head
+
+
+# ---------------------------------------------------------------------------
 # WebtoonCrawler
 # ---------------------------------------------------------------------------
 import re
@@ -351,9 +525,20 @@ def crawl(
     language: str = "en",
     limit: int | None = None,
     fetcher: Fetcher | None = None,
+    window: DateWindow | None = None,
 ) -> list[dict]:
+    """Rows from the newest episodes, optionally restricted to a date window.
+
+    Both loops here are newest-first (WEBTOON lists episodes newest-first and the
+    comment API returns newest comments first), so a date window also ends the
+    work early: episodes entirely older than ``--since`` are skipped without
+    fetching their comments, and a comment page that runs past ``--since`` for
+    :data:`EARLY_STOP_BUFFER` items in a row stops that episode. Pinned comments
+    sit among the newest ones, which is exactly why the buffer exists.
+    """
     own = fetcher is None
     fetcher = fetcher or Fetcher()
+    window = window or DateWindow()
     headers = _api_headers(fetcher, language)
     rows: list[dict] = []
     try:
@@ -364,7 +549,19 @@ def crawl(
                 print(f"  ! {series_url}: {exc}")
                 continue
             print(f"  {series_title or series_url}: {len(episodes)} episodes found")
-            for ep in episodes[: max(0, episodes_per_series)]:
+            picked = 0
+            episode_stamps: list[str] = []
+            for ep in episodes:
+                if picked >= max(0, episodes_per_series):
+                    break
+                episode_date = loose_datetime(ep.get("date"))
+                episode_stamps.append(episode_date)
+                if window.since and episode_date and episode_date < window.since:
+                    if crossed_window(episode_stamps, window, buffer=2):
+                        print(f"  episodes older than {window.since} - stopping this series")
+                        break
+                    continue  # one stray older date (a re-listed episode) - skip it, keep going
+                picked += 1
                 page_id = f"w_{ep['title_no']}_{ep['episode_no']}"
                 cursor = None
                 for _ in range(max(1, pages)):
@@ -376,9 +573,10 @@ def crawl(
                     )
                     result = payload.get("result", {})
                     posts = result.get("posts", [])
+                    page_rows = []
                     for post in posts:
                         author = (post.get("createdBy") or {}).get("name", "")
-                        rows.append(
+                        page_rows.append(
                             make_row(
                                 post_detail=post.get("body", ""),
                                 platform=PLATFORM,
@@ -393,10 +591,17 @@ def crawl(
                                 post_id=post.get("id", ""),
                             )
                         )
+                    rows.extend(filter_rows(page_rows, window))
+                    if limit and len(rows) >= limit:
+                        return rows[:limit]
+                    if crossed_window([r["post_created_time"] for r in page_rows], window,
+                                      buffer=5):
+                        print(f"    comments older than {window.since} - stopping this episode")
+                        break
                     cursor = (result.get("pagination") or {}).get("next")
                     if not cursor or not posts:
                         break
-                print(f"    episode {ep['episode_no']} ({ep['title']}): +{len(rows)} rows so far")
+                print(f"    episode {ep['episode_no']} ({ep['title']}): {len(rows)} rows so far")
                 if limit and len(rows) >= limit:
                     return rows[:limit]
     finally:
@@ -413,18 +618,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=25, help="max rows (default 25)")
     p.add_argument("--out", default="WebtoonCrawlerResults.csv", help="output CSV path")
     p.add_argument("--quiet", action="store_true", help="less per-episode logging")
+    add_window_args(p)
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    window = window_from_args(args)
     rows = crawl(series_urls=args.series, episodes_per_series=args.episodes,
-                 pages=args.pages, limit=args.limit)
+                 pages=args.pages, limit=args.limit, window=window)
     if not rows:
-        print("no rows collected")
+        print("no rows collected" + (f" for {window.describe()}" if window.active else ""))
         return 1
     write_csv(rows, args.out)
-    print(f"\n{len(rows)} rows -> {args.out}")
+    print(f"\n{len(rows)} rows -> {args.out}  [{window_summary(rows, window)}]")
     return 0
 
 
