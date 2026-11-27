@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Crawl output (samples/ is committed on purpose; ad-hoc runs are not)
+out/
+output/
+scratch*/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
